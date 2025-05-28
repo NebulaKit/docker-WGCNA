@@ -34,6 +34,7 @@ rmarkdown::render("WGCNA.Rmd")
 ```
 
 Run with your own dataset:
+
 Make sure your input .csv is placed in the mounted /home/data/ folder, then:
 
 ```r
@@ -45,8 +46,10 @@ rmarkdown::render("WGCNA.Rmd",
 )
 ```
 Important: When using your own data, the file must be a CSV where:
-Samples are in rows, and molecular features (e.g., lipids, genes, etc.) are in columns
-The first column must be named Group and contain sample labels or phenotypes (e.g., disease vs control, treatment group, etc.)
+
+1. Samples are in rows, and molecular features (e.g., lipids, genes, etc.) are in columns
+
+2. The first column must be named Group and contain sample labels or phenotypes (e.g., disease vs control, treatment group, etc.)
 
 
 Customize additional parameters (optional):
