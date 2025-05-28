@@ -1,6 +1,6 @@
 # 🧬 WGCNA Docker Environment
 
-A Dockerized environment for performing **Weighted Gene Correlation Network Analysis (WGCNA)** in R. This container includes all necessary dependencies, a demo R Markdown pipeline, and support for custom datasets via volume mounts.
+A Dockerized environment for performing **Weighted Gene Co-expression Network Analysis (WGCNA)** in R. This container includes all necessary dependencies, a demo R Markdown pipeline, and support for custom datasets via volume mounts.
 
 ---
 
