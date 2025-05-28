@@ -1,0 +1,13 @@
+{
+  "description": "Synthetic lipidomics dataset",
+  "generator": "GaussianCopula (SDV)",
+  "samples": 140,
+  "features": 2526,
+  "groups": {
+    "A": "high-fat",
+    "B": "high-fat double",
+    "C": "high-carbohydrate",
+    "D": "control"
+  },
+  "date": "2024-05-26"
+}

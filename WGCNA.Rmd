@@ -1,0 +1,568 @@
+---
+title: "Weighted Gene Correlation Network Analysis"
+date: "`r Sys.Date()`"
+output: 
+  prettydoc::html_pretty:
+    theme: leonids
+    toc: yes
+params:
+  input_file: "demo_data/lipidomics_synthetic.csv"
+  sample_cutoff_height: null
+  minClusterSize: 10
+  module_merge_height: 0.25
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+# Load libraries
+library(WGCNA)
+library(pillar)
+library(dplyr)
+library(ggplot2)
+library(igraph)
+library(tidygraph)
+library(reshape2)
+library(ggtext)
+library(ggdendro)
+library(pheatmap)
+library(doParallel)
+library(parallel)
+```
+
+## Introduction
+
+WGCNA used for network construction [@Langfelder2008], as implemented in the R package [@Langfelder2012].
+
+### Goal
+To find groups of molecular features (such as genes, metabolites, lipids, or proteins) that show similar expression/concentration patterns across samples and may be related to traits of interest.
+
+### What is WGCNA?
+WGCNA is a method used to explore large-scale molecular data by building a network based on correlations between features. Each feature (e.g., a gene or metabolite) is treated as a **node**, and correlations between them as **edges** in the network.
+
+### What Can WGCNA Do?
+- **Identify clusters (modules)** of molecular features that fluctuate together across samples  
+- **Detect hub features** within modules that are highly connected and may play key biological roles  
+- **Explore relationships between modules**, revealing broader organizational patterns  
+- **Relate modules or features to external sample traits**, such as disease status, treatment group, or phenotype
+
+### Why Use WGCNA?
+WGCNA simplifies complex omics data by grouping related features, making it easier to detect meaningful biological patterns. It also improves statistical robustness by:  
+
+- Reducing noise from individual feature variability  
+- Minimizing issues with multiple testing by focusing on modules instead of single features  
+
+This makes WGCNA a powerful tool for discovering candidate biomarkers, co-regulated molecules, or functional pathways.
+
+## Analysis
+
+The dataset used in this analysis was synthetically generated using the **GaussianCopula** model from the [**SDV (Synthetic Data Vault)**](https://github.com/sdv-dev/SDV) framework. It is based on a real **MS/MS-annotated lipidomics dataset**, preserving the statistical structure and variability of the original data while ensuring reproducibility and data privacy.
+
+The dataset contains **2526 lipid features** measured across **140 samples**, each assigned to one of **four dietary groups**:  
+
+- **A** – high-fat  
+- **B** – high-fat, double dose  
+- **C** – high-carbohydrate  
+- **D** – control
+
+### Loading the Data
+
+When importing the dataset, R may automatically prefix column names that begin with a number (such as lipid identifiers) with an `"X"` to create syntactically valid variable names. To restore the original feature names, the `sub()` function is used to remove this prefix.
+
+```{r}
+data <- read.csv(params$input_file,
+                 header = TRUE,
+                 check.names = FALSE)
+colnames(data) <- sub("^X", "", colnames(data))
+```
+
+### Data Preprocessing and Outlier Removal
+
+Ensure that the feature matrix contains only numerical measurements by removing any non-numeric columns such as sample labels or identifiers.
+
+```{r}
+lipidomics.data <- data[, -1]
+```
+
+#### Identifying Outlier Lipids
+
+The `goodSamplesGenes()` function from the WGCNA package is used to check the quality of samples and features (genes, lipids, proteins, etc.) in a dataset before network analysis. It identifies missing or zero-variance values, which can negatively impact WGCNA results.
+
+```{r}
+gsg <-goodSamplesGenes(lipidomics.data)
+summary(gsg)
+```
+
+In this case, the summary output confirms that **all 2526 lipid features and all 140 samples passed** the quality check (`allOK = 1`). Therefore, no additional filtering is necessary at this stage.
+
+#### Identifying Outlier Samples
+
+To detect potential outlier samples, hierarchical clustering is performed based on pairwise distances between all samples. The resulting dendrogram visually groups samples according to similarity in their molecular profiles. A red horizontal line indicates a selected cutoff height (`cutoff_height`), which can be adjusted to define sample clusters. Samples that fall into small or isolated branches above this threshold may be considered outliers and can be removed before downstream analysis.
+
+```{r, fig.width=14, fig.height=6}
+# Perform hierarchical clustering on samples
+sampleTree <- hclust(dist(lipidomics.data), method = "average")  
+
+# Plot the dendrogram to detect outliers
+par(cex = 0.6, mar = c(0, 5, 2, 0))  
+plot(sampleTree, main = "Sample Clustering to Detect Outliers", sub = "", xlab = "",
+     cex.lab = 1.5, cex.axis = 1.5, cex.main = 2)
+
+# Select a cutoff height
+# Use user-specified cutoff or default to 99th percentile
+cutoff_height <- if (is.null(params$sample_cutoff_height)) {
+  quantile(sampleTree$height, probs = 0.95)
+} else {
+  params$sample_cutoff_height
+}
+abline(h = cutoff_height, col = "red")
+```
+
+Based on the sample dendrogram, a dynamic cutoff corresponding to the 95th percentile of the sample-to-sample distance heights was applied to identify potential outliers. This percentile-based threshold adapts to the structure of each dataset and helps distinguish samples that are substantially less similar to the majority. Samples falling above this cutoff may indicate technical artifacts, low-quality measurements, or biologically extreme profiles, and can be considered for exclusion from downstream analysis.
+
+#### Removing Outlier Samples
+
+```{r, fig.width=14, fig.height=6}
+# Store sample names before filtering
+samples_before <- rownames(lipidomics.data)
+
+# Apply hierarchical clustering and remove outliers
+cut.sampleTree <- cutreeStatic(sampleTree, cutHeight = cutoff_height, minSize = 10)
+lipidomics.data <- lipidomics.data[cut.sampleTree == 1, ]
+
+# Identify an print the removed samples
+samples_after <- rownames(lipidomics.data)
+removed_samples <- setdiff(samples_before, samples_after)
+cat("Removed Samples:\n", paste(removed_samples, collapse = ", "), "\n")
+
+# Perform hierarchical clustering on remaining samples
+sampleTree <- hclust(dist(lipidomics.data), method = "average")  
+
+# Plot the dendrogram
+par(cex = 0.6, mar = c(0, 5, 2, 0))  
+plot(sampleTree, main = "Remaining Samples", sub = "", xlab = "",
+     cex.lab = 1.5, cex.axis = 1.5, cex.main = 2)
+```
+
+After applying hierarchical clustering and removing outlier samples using a fixed cutoff height, the dendrogram was regenerated to visualize the structure of the remaining dataset. The updated dendrogram shows tighter and more cohesive clustering, indicating improved sample homogeneity.
+
+### Network Construction
+#### Similarity Measurement
+
+After removing outlier samples, the next step in constructing a correlation network is to define a **similarity measure** between pairs of molecular features (e.g., genes, lipids, metabolites). This measure captures how closely the abundance profiles of two features track together across all samples. In WGCNA, similarity is typically quantified using the **Pearson correlation coefficient**, which reflects the strength and direction of the linear relationship between two features.
+
+##### Unsigned Networks
+In unsigned networks, the similarity measure is based on the **absolute value** of the correlation coefficient:
+
+$$
+s_{ab} = |\text{cor}(a, b)|
+$$
+
+This approach captures both positive and negative correlations equally, focusing solely on the strength of the relationship, not its direction. While unsigned networks can be useful in some contexts, they are less commonly used in WGCNA because they make biological interpretation more challenging. Specifically, unsigned networks do not distinguish whether features are increasing or decreasing together with respect to a sample trait—only that their abundance profiles are strongly related.
+
+##### Signed Networks
+In contrast, signed networks retain the direction of correlation, making them more biologically meaningful. The similarity measure in a signed network is calculated as:
+
+$$
+s_{ab} = 0.5 + 0.5 \times \text{cor}(a, b)
+$$
+
+This transformation ensures that positively correlated genes have higher similarity values, while negatively correlated genes have lower similarity values, preserving their biological significance.
+
+#### Adjacency: Pairwise connection
+
+Once **pairwise similarity** between molecular features (e.g., genes, lipids, or metabolites) has been calculated, the next step is to convert these similarity values into **adjacency values**, which form the **adjacency matrix**. Adjacency reflects the strength of connection between features based on their similarity (typically measured using the **Pearson correlation coefficient**). In the network, two nodes are considered connected if they show a strong pairwise relationship.
+
+To build the adjacency matrix, a **transformation function** is applied to the similarity scores. The specific form of this function may vary depending on the type of network selected (e.g., *signed* vs. *unsigned*, *soft* vs. *hard thresholding*).
+
+##### Unweighted Networks 
+
+In unweighted networks, the adjacency matrix is **binary**, indicating only whether a pair of molecular features (e.g., genes, lipids, or metabolites) are connected or not—regardless of the strength of that connection.
+
+Unweighted networks apply a **hard threshold** to the similarity scores using the signum function:
+
+$$
+a_{ij} = \text{signum}(s_{ij}, \tau) =
+\begin{cases}
+1, & \text{if } s_{ij} \geq \tau \\
+0, & \text{if } s_{ij} < \tau
+\end{cases}
+$$
+
+Here, \( s_{ij} \) is the similarity score between features *i* and *j*, and \( \tau \) is a predefined threshold. If the similarity is greater than or equal to this threshold, the pair is considered connected (value = 1); otherwise, they are unconnected (value = 0).
+
+>**Note:**  
+Using a hard threshold can result in a loss of valuable information. For example, if \( \tau = 0.9 \), a pair with \( s_{ij} = 0.89999999999 \) will be considered completely unconnected, despite a high similarity. This limitation is why weighted networks are often preferred.
+
+##### Weighted Networks 
+
+Unlike unweighted networks, where connections are binary, weighted networks allow for **varying connection strengths**, providing a more nuanced representation of relationships between nodes.
+
+Weighted networks use a power function based on a soft threshold parameter \( \beta \):
+
+$$
+a_{ij} = \text{power}(s_{ij}, \beta) = |s_{ij}|^\beta
+$$
+
+Here, the adjacency matrix value is determined by raising the similarity measurement \( s_{ij} \) to the power of the chosen threshold parameter \( \beta \). This approach retains continuous information about connection strengths rather than enforcing strict binary classifications.
+
+>**Note:**  
+The WGCNA package includes a built-in function, `adjacency()`, which computes both pairwise similarity measurements and the adjacency matrix. However, before calling this function, you must first determine an appropriate value for the soft threshold parameter \( \beta \).
+
+##### Determining the Soft Power Threshold
+
+In weighted network analysis, the **soft threshold power \( \beta \)** determines how strongly feature-to-feature similarities (e.g., correlations) are transformed into **connection strengths** (adjacency) in the network.
+
+To choose an appropriate \( \beta \) value, we apply a **scale-free topology criterion**. This means we want the resulting network to mimic the structure seen in many biological systems—where a few nodes are highly connected, while most nodes have only a few connections.
+
+How the selection process works:  
+
+- For a range of β values (e.g., 1 to 20), we assess how well the network fits a **scale-free topology model**.  
+- The fit is measured using the **R² value** from linear regression between log-transformed node connectivity (i.e., number of connections per feature) and the frequency of nodes with that connectivity.  
+- A **higher R²** indicates a better fit to scale-free topology.  
+- However, using a β value that is too high can make the network **too sparse**, losing important connections.  
+
+In a **scale-free topology**, the probability that a node connects with \( k \) other nodes follows a power-law distribution:
+
+$$
+p(k) \sim k^{-\gamma}
+$$
+
+> **In short**:  
+> Choose the lowest β that achieves **R² > 0.8**, balancing scale-free structure and network connectivity.
+
+>**Note:** For a deeper understanding of the scale-free topology model and its assumptions, refer to relevant literature on biological network structures. Some sources on this topic are provided in the reference list. 
+
+The WGCNA package provides a built-in function to determine the optimal \( \beta \) value for constructing the adjacency matrix. The `pickSoftThreshold()` function evaluates multiple networks using different \( \beta \) values and returns a data frame containing the \( R^2 \) fit for the scale-free topology model along with mean connectivity measures.
+
+```{r, warning=FALSE}
+spt <- pickSoftThreshold(lipidomics.data); spt
+```
+
+In this case:
+
+- The threshold power \( \beta = 5 \) was automatically selected (see `$powerEstimate`)  
+- This value gives an \( R^2 = 0.87 \), indicating a strong scale-free fit  
+- Mean connectivity is still acceptable (\( \text{mean.k} = 11.15 \)), ensuring the network remains well-connected
+
+This selected power will be used to calculate adjacency values in the next step of network construction.
+
+
+`pickSoftThreshold()` function also supports **parallel processing**, which can significantly reduce computation time for large datasets. To enable parallel execution, you can register a parallel backend using the `doParallel` package before running `pickSoftThreshold()`.
+
+```{r, eval = FALSE}
+# Install and load required packages
+install.packages("doParallel")
+library(doParallel)
+library(parallel)
+
+# Automatically detect number of cores, reserve 1 for system
+num_cores <- max(1, detectCores() - 1)
+
+# Register parallel backend
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Run WGCNA soft thresholding
+spt <- pickSoftThreshold(lipidomics.data); spt
+
+# Stop the cluster when done
+stopCluster(cl)
+```
+
+##### Calling the Adjacency Function
+
+With the soft threshold power (\(\beta\)) determined, the next step is to use the `adjacency()` function from the WGCNA package. The `adjacency()` function computes pairwise similarity measurements, applies the adjacency transformation, and constructs the weighted network adjacency matrix.
+
+```{r}
+adjacency <- adjacency(lipidomics.data,
+                       power = spt$powerEstimate,
+                       #corFnc = "bicor",
+                       type = "signed"
+                       )
+```
+
+### Module Construction
+#### Defining Dissimilarity
+
+Once the network is constructed, the next step is to identify meaningful relationships by applying hierarchical clustering to group the network into modules.  
+
+> Note: A module is a group of feature profiles that are highly correlated or share a high topological overlap.  
+
+To perform clustering in R, the adjacency matrix must first be transformed into a measure of feature dissimilarity, which represents the distance between each feature and every other feature in the system.  
+
+> Note: This transformation is necessary because traditional clustering methods rely on dissimilarity rather than similarity.
+
+#### Topological Overlap Matrix  
+
+The TOM-based dissimilarity measure is often preferred over correlation-based dissimilarity because it produces more distinct and well-defined modules.  
+
+> Note: For more information on the advantages of using topological overlap, refer to relevant publications on the subject.  
+
+To convert the adjacency matrix into a TOM similarity matrix, the `TOMsimilarity()` function from the WGCNA package can be used.
+
+```{r}
+TOM <- TOMsimilarity(adjacency)
+```
+
+To convert this matrix into a dissimilarity matrix you can subtract the TOM object from 1.
+
+```{r}
+TOM.dissimilarity <- 1-TOM
+```
+
+#### Hierarchical Clustering Analysis  
+
+The dissimilarity or distance measures are clustered using linkage hierarchical clustering, resulting in a dendrogram that represents the hierarchical organization of features  
+
+
+```{r lipid_dendrogram, fig.width=12, fig.height=9}
+# Creating the dendrogram
+lipidTree <- hclust(as.dist(TOM.dissimilarity), method = "average")  
+
+# Plotting the dendrogram
+plot(lipidTree, xlab="", sub="", main = "Clustering on TOM-based dissimilarity", 
+     labels = FALSE, hang = 0.04)
+```
+
+#### Identifying Modules  
+
+To identify modules from the lipid dendrogram, the `cutreeDynamic()` function can be used. This allows for the specification of a minimum module size, ensuring that only sufficiently large clusters are retained.  
+
+> Note: For large datasets like lipidomics, it is generally beneficial to set a relatively high minimum module size to account for the high dimensionality of the data. The authors of WGCNA recommend starting with `minClusterSize = 30`. But for the purpose of this demostration we will use `minClusterSize = 10`.
+
+
+```{r}
+Modules <- cutreeDynamic(dendro = lipidTree, distM = TOM.dissimilarity, deepSplit = 2, pamRespectsDendro = FALSE, minClusterSize = params$minClusterSize)
+```
+After identifying the modules, the next step is to examine how many lipids have been assigned to each module.
+
+```{r}
+table(Modules) 
+```
+
+This output provides a summary of module sizes, showing how many lipids belong to each detected module. Large modules indicate strong co-expression patterns, while very small modules may need further investigation.
+
+>**Note:**
+1. Module 0 typically represents unassigned lipids that did not fit into any module based on the given parameters.
+
+#### Visualizing Module Assignments 
+
+After identifying modules, the next step is to visualize their assignment within the lipid dendrogram. Each module is assigned a unique color for better interpretability.
+
+```{r}
+# Assign a color to each module
+ModuleColors <- labels2colors(Modules) 
+
+# Display the number of lipids in each module color
+table(ModuleColors) 
+```
+
+```{r}
+# Plots the lipid dendrogram with the module colors
+plotDendroAndColors(lipidTree, ModuleColors,"Module",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    main = "Dendrogram and module colors")
+```
+
+The dendrogram represents the hierarchical clustering of lipids based on TOM-based dissimilarity, while the colored bar below indicates the module assignments. Each unique color corresponds to a different lipid module, grouping lipids with highly similar expression patterns.
+
+#### Module eigenmolecule Identification  
+
+A Module eigenmolecule (ME) represents the standardized lipid expression profile for a given module. It is calculated as the first principal component of the lipid expression data within a module, summarizing its overall expression pattern.  
+
+To identify module eigenmolecules, the `moduleEigengenes()` function is used. The output from `head(MEs)` represents the Module eigenmolecule (ME) matrix, where:  
+
+- Rows represent individual samples (e.g., lipidomic profiles from different conditions or individuals).  
+- Columns represent module eigenmolecules, with each ME summarizing the expression pattern of a specific lipid module.  
+- Each value in the matrix represents the standardized expression level of a module eigenmolecule in a given sample.
+
+```{r}
+# Calculate Module eigenmolecules
+MElist <- moduleEigengenes(lipidomics.data, colors = ModuleColors) 
+
+# Extract the eigenmolecule matrix
+MEs <- MElist$eigengenes 
+
+# Display the first few rows
+head(MEs)
+```
+
+- Each module eigenmolecule (e.g., `MEblack`, `MEblue`, `MEbrown`, etc.) represents the first principal component of all lipid features in that module.  
+- A higher or lower eigenmolecule value for a sample indicates how strongly the lipids in that module are expressed in that sample.  
+- The grey module (`MEgrey`) typically represents unassigned lipids that did not cluster into a meaningful module.  
+- This matrix can be used in correlation analysis with external traits (e.g., clinical data, experimental conditions) to identify biologically relevant lipid modules.
+
+#### Module Merging
+
+To further refine the clustering of lipid modules, modules with similar expression patterns can be merged. This is achieved by clustering modules based on pairwise eigenmolecule correlations, allowing modules with highly similar lipid expression profiles to be combined.  
+
+> Reminder: A module eigenmolecule represents the overall lipid expression pattern within a module and serves as a summary of its co-expressed lipids.  
+
+Before performing module clustering, a dissimilarity measure (distance) between module eigenmolecules must be computed.  
+
+If the dataset contains missing values, it is necessary to handle `NA` values to ensure accurate calculations. This can be done by specifying the argument `use = "complete"`, which removes rows with missing values before computing dissimilarity. This step allows `ME.dissimilarity` to run successfully, but may not be required for all datasets.
+
+```{r}
+# Remove the grey module (usually named "MEgrey")
+MEs.cleaned <- MEs[, !grepl("grey", colnames(MEs))]
+
+# Now calculate eigenmolecule dissimilarity
+ME.dissimilarity <- 1 - cor(MEs.cleaned, use = "complete.obs")
+```
+
+Using the newly computed dissimilarity measurements, a cluster tree of module eigenmolecules can now be constructed. This hierarchical clustering will help visualize the relationships between modules.  
+
+To identify modules that should be merged, a horizontal cut line is added at a height of 0.25. This threshold corresponds to a correlation of over 75%, meaning that any branches below this line share strong similarity (>75% correlation) and will be merged.  
+
+
+```{r}
+METree = hclust(as.dist(ME.dissimilarity), method = "average") # Clustering eigenmolecules 
+par(mar = c(0,4,2,0))
+par(cex = 0.6);
+plot(METree)
+abline(h=params$module_merge_height, col = "red") # a height of .25 corresponds to correlation of .75
+```
+
+The dendrogram represents the hierarchical clustering of module eigenmolecules (MEs) based on their pairwise dissimilarity. The red horizontal line is set at 0.25, which corresponds to a correlation of 75%. Modules clustered below this threshold are considered highly similar and are candidates for merging. Modules below the red line ('MEdarkturquoise' and 'MElighyellow') will be merged to improve module robustness. Now you can merge these two modules using the `mergeCloseModules()` function:
+
+```{r}
+merge <- mergeCloseModules(lipidomics.data, ModuleColors, cutHeight = params$module_merge_height)
+
+# The merged module colors, assigning one color to each module
+mergedColors = merge$colors
+names(mergedColors) <- colnames(lipidomics.data)
+
+# eigenmolecules of the new merged modules
+mergedMEs = merge$newMEs
+
+# Save assignments to CSV
+module_assignment <- data.frame(Feature = names(mergedColors),
+                                 ModuleColor = mergedColors)
+write.csv(module_assignment, file = "merged_module_assignments.csv", row.names = FALSE)
+```
+
+The similar modules have now been successfully merged! To assess the impact of this merging, we will generate a new dendrogram and compare it with the original module structure.
+
+```{r, fig.width=12, fig.height=6}
+plotDendroAndColors(lipidTree, cbind(ModuleColors, mergedColors), 
+                  c("Original Module", "Merged Module"),
+                  dendroLabels = FALSE, hang = 0.03,
+                  addGuide = TRUE, guideHang = 0.05,
+                  main = "Dendrogram and module colors for original and merged modules")
+```
+
+This dendrogram shows the hierarchical clustering of lipid features, with original modules (top color row) merged based on eigenmolecule similarity into more coherent groups (bottom row). The merging process reduces redundancy by combining highly similar modules enhancing biological interpretability and robustness for downstream analyses like trait association or enrichment.
+
+### Visualize Module-Trait Relationships
+
+To explore associations between coexpression modules and sample traits, we compute Pearson correlations between module eigenmolecules (MEs) and group labels.
+
+```{r, fig.width=8, fig.height=8}
+sample_groups <- data$Group
+names(sample_groups) <- rownames(data)
+
+# Remove outlier samples from goup labels
+group <- sample_groups[!(rownames(data) %in% removed_samples)]
+
+# Compute module-trait correlations using one-hot encoded group labels
+module_trait_cor <- cor(MEs.cleaned, model.matrix(~ group - 1), use = "p")
+
+# Remove "group" prefix from column names
+colnames(module_trait_cor) <- gsub("^group", "", colnames(module_trait_cor))
+
+# Visualize as a heatmap
+pheatmap::pheatmap(module_trait_cor, 
+                   cluster_rows = TRUE, 
+                   cluster_cols = FALSE, 
+                   main = "Module-Trait Relationships",
+                   angle_col = 0)
+```
+
+The heatmap above shows the correlation between each module eigengene (row) and experimental group (column). Rows are hierarchically clustered to highlight similarities in module–trait profiles. Warmer colors (red) indicate positive correlation, cooler tones (blue) indicate negative correlation. This visualization provides a high-level overview of which modules vary systematically across groups, suggesting potential relevance to biological or experimental differences.
+
+```{r, fig.width=6, fig.height=8}
+mergedMEs.cleaned <- mergedMEs[, !grepl("grey", colnames(mergedMEs))]
+
+# Assign sample groups and remove outliers
+group <- setNames(data$Group, rownames(data))
+group <- group[!names(group) %in% removed_samples]
+nSamples <- nrow(lipidomics.data)
+group_factors <- model.matrix(~ 0 + factor(group))  # ~0 means no intercept
+colnames(group_factors) <- levels(factor(group))
+
+module.trait.correlation <- cor(mergedMEs.cleaned, group_factors, use = "p")
+module.trait.Pvalue <- corPvalueStudent(module.trait.correlation, nSamples)
+
+# Convert correlation and p-values to long format
+cor_long <- melt(module.trait.correlation)
+pval_long <- melt(module.trait.Pvalue)
+
+# Merge into one data frame
+plot_df <- left_join(cor_long, pval_long, by = c("Var1", "Var2"))
+colnames(plot_df) <- c("Module", "Group", "Correlation", "Pvalue")
+
+# Format label text: bold only if p < 0.05
+plot_df <- plot_df %>%
+  mutate(Label = ifelse(Pvalue < 0.05,
+                        paste0("**", signif(Correlation, 2), "<br>(",
+                               signif(Pvalue, 1), ")**"),
+                        paste0(signif(Correlation, 2), "<br>(",
+                               signif(Pvalue, 1), ")")))
+
+# Plot using ggplot2 with geom_richtext
+ggplot(plot_df, aes(x = Group, y = Module, fill = Correlation)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0,
+                       limit = c(-1, 1), name = "Correlation") +
+  geom_richtext(aes(label = Label), size = 3, fill = NA, label.color = NA) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank()) +
+  ggtitle("Module–Trait Relationships (bold p < 0.05)")
+
+```
+
+To complement the correlation heatmap, the plot above displays both the correlation values and their statistical significance. Each tile shows the correlation coefficient (top) and the associated p-value (in parentheses). Values with p < 0.05 are bolded to highlight statistically meaningful associations.
+
+#### Identify Significantly Trait-Associated Modules
+
+To prioritize coexpression modules for downstream interpretation, we filter modules based on their correlation strength and statistical significance with at least one group.
+
+```{r}
+sig_modules <- rownames(module.trait.Pvalue)[
+  apply(module.trait.Pvalue < 0.05 & abs(module.trait.correlation) > 0.2, 1, any)]
+sig_modules <- gsub("^ME", "", sig_modules)
+sig_modules
+```
+
+This code identifies modules with at least one group-wise correlation that is both statistically significant (*p* < 0.05) and biologically meaningful (|*r*| > 0.2). Seven modules meet these combined criteria: `greenyellow`, `salmon`, `royalblue`, `white`, `lightcyan`, `darkturquoise`, `purple`.
+
+#### Visualize Module–Group Associations via eigenmolecule Network
+
+The plot below presents a combined dendrogram and heatmap of module eigenmolecules (MEs) alongside the one-hot encoded group variables. This integrated view illustrates how modules relate to each other and to the experimental groups.
+
+```{r, warning=FALSE}
+# Ensure group_factors is a data.frame
+group_factors <- as.data.frame(group_factors)
+
+# Extract list of single-column data.frames with appropriate names
+group_dfs <- lapply(seq_along(group_factors), function(i) {
+  df <- as.data.frame(group_factors[[i]])
+  names(df) <- names(group_factors)[i]
+  df
+})
+
+# Combine MEs with group factor data
+MET <- orderMEs(do.call(cbind, c(list(MEs.cleaned), group_dfs)))
+
+# Plot
+par(cex = 0.9)
+plotEigengeneNetworks(MET, "", marDendro = c(0,4,1,2), marHeatmap = c(5,4,1,2), 
+                      cex.lab = 0.8, xLabelsAngle = 90)
+```
+
+This visualization reveals a clear grouping pattern where groups A and D cluster together, suggesting they share similar module expression profiles, while groups B and C form distinct, separate branches. This indicates that the molecular patterns captured by the module eigenmolecules are more alike between A and D, and distinctly different in B and C. Such separation highlights potential underlying biological or experimental differences between these groupings, which can guide targeted downstream analysis.
+
+
+# References
