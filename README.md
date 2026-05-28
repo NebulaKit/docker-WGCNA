@@ -9,7 +9,7 @@ A Dockerized environment for performing **Weighted Gene Co-expression Network An
 ## 📦 Pull the Docker Image
 
 ```bash
-docker pull kristinagrausa/wgcna-env:latest
+docker pull rsubioinfogroup/wgcna:latest
 ```
 
 
@@ -17,12 +17,12 @@ docker pull kristinagrausa/wgcna-env:latest
 
 Start an interactive R session:
 ```bash
-docker run -it kristinagrausa/wgcna-env
+docker run -it rsubioinfogroup/wgcna:latest
 ```
 
 Start with volume mount (necessary for using your own data):
 ```bash
-docker run -it -v /path/to/your/local/folder:/home/data kristinagrausa/wgcna-env
+docker run -it -v /path/to/your/local/folder:/home/data rsubioinfogroup/wgcna:latest
 ```
 Replace /path/to/your/local/folder with your actual local directory path.
 On Windows, use a path like:
@@ -73,11 +73,3 @@ Use volume mounts to load your own datasets and save outputs to your local drive
 All key WGCNA parameters (e.g., soft thresholding, module size, merge height) can be adjusted via the params argument in rmarkdown::render().
 
 Output HTML reports and results tables are automatically generated.
-
-## 👩‍🔬 Author
-Kristīna Grausa, MSc
-Researcher – Bioinformatics Group
-Riga Stradiņš University
-
-## 📄 License
-MIT License
