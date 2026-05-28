@@ -67,23 +67,6 @@ rmarkdown::render("WGCNA.Rmd",
 )
 ```
 
-## 🧾 Retrieve Output Files
-If you saved your results inside /home/data, and that folder is volume-mounted, your results will be directly available in your local system.
-
-If not, follow these steps:
-
-1. Get the container ID or name:
-```bash
-docker ps
-```
-
-2. Copy files from the container to your host machine:
-
-```bash
-docker cp <container_name_or_id>:/home/output_file.html /path/to/local/folder/
-docker cp <container_name_or_id>:/home/any_other_file.csv /path/to/local/folder/
-```
-
 ## 🧠 Notes
 Use volume mounts to load your own datasets and save outputs to your local drive.
 
