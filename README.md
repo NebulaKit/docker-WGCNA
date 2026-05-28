@@ -95,4 +95,4 @@ Researcher – Bioinformatics Group
 Riga Stradiņš University
 
 ## 📄 License
-MIT License (or your preferred open-source license)
+MIT License
